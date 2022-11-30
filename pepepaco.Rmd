@@ -1,0 +1,95 @@
+---
+title: "p2"
+author: "Jesus Molina Piernas & Álvaro Navarro Navarro"
+date: "2022-11-24"
+output:
+  html_document:
+    df_print: paged
+    highlight: kate
+    number_sections: no
+    theme: spacelab
+    toc: yes
+    toc_float: yes
+  pdf_document:
+    toc: yes
+---
+
+```{r setup ,include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+
+```
+
+```{r Imports, echo=FALSE}
+library(readxl)
+library(caret)
+library(plyr)
+library(recipes)
+library(dplyr)
+library(ranger)
+library(ModelMetrics)
+library(xgboost)
+```
+
+```{r Cargar datos}
+infoRice <- read_xlsx("./Rice_MSC_Dataset.xlsx")
+infoRice <- na.omit(infoRice)
+```
+
+
+
+```{r hacer prcomp}
+
+infoRice3 <- subset(infoRice, select = -c(CLASS))
+infoRice3 <- as.data.frame(infoRice3)
+
+prcompArroces <- prcomp(infoRice3, scale = TRUE, center = TRUE)
+summary(prcompArroces, loadings = TRUE)
+
+infoRice4 <- infoRice
+infoRice4$CLASS <- as.factor(infoRice4$CLASS)
+
+pcas <- as.data.frame(prcompArroces$x[,1:7])
+
+pcasConClases <- cbind(pcas, CLASS = infoRice4$CLASS)
+
+train_i <- sample(1:nrow(pcasConClases),NROW(pcasConClases)*0.8)
+
+datatrain <-pcas[train_i,]
+datatest <-pcas[-train_i,]
+
+datatrainConClase <- pcasConClases[train_i,]
+
+datatestConClase <- pcasConClases[-train_i,]
+```
+
+```{r Random forest}
+model1 <- ranger(CLASS ~ ., data = datatrainConClase,num.trees = 100)
+preds <- predict(model1,datatest)
+mae(datatestConClase$CLASS,preds$predictions)
+```
+
+```{r train mlpKerasDropout, eval=FALSE}
+model_mlpKerasDropout <- train(CLASS ~ ., data = datatrainConClase, 
+                            method = "mlpKerasDropout", 
+                            trControl = trainControl(method = "cv", number = 5))
+saveRDS(model_mlpKerasDropout, "mlpKerasDropout.rds")
+```
+
+```{r test mlpKerasDropout}
+model_mlpKerasDropout <- readRDS("./mlpKerasDropout-PCA.rds")
+preds_mlpKerasDropout <- predict(model_mlpKerasDropout,datatest)
+mae(datatestConClase$CLASS,preds_mlpKerasDropout)
+```
+
+```{r train xgboost, eval=FALSE}
+model_xgboost <- train(CLASS ~ ., data = datatrainConClase, 
+                            method = "xgbLinear", 
+                            trControl = trainControl(method = "cv", number = 4))
+saveRDS(model_xgboost, "xgbLinear.rds")
+```
+
+```{r test xgboost}
+model_xgbLinear <- readRDS("./xgbLinear.rds")
+preds_xgbLinear <- predict(model_xgbLinear,datatest)
+mae(datatestConClase$CLASS,preds_xgbLinear)
+```
