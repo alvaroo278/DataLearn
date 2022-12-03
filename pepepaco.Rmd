@@ -6,8 +6,8 @@ output:
   html_document:
     df_print: paged
     highlight: kate
-    number_sections: no
     theme: spacelab
+    number_sections: yes
     toc: yes
     toc_float: yes
   pdf_document:
@@ -16,7 +16,6 @@ output:
 
 ```{r setup ,include=FALSE}
 knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
-
 ```
 
 ```{r Imports, echo=FALSE}
@@ -28,41 +27,291 @@ library(dplyr)
 library(ranger)
 library(ModelMetrics)
 library(xgboost)
+library(doParallel)
 ```
+
+# Carga de datos
+
+En primer lugar, se cargan los datos sobre los que se va a realizar todo el proceso. Se ha decidido partir de los datos en crudo, es decir, sin haber realizado ninguna limpieza ni agrupación de variable, con la idea de que quede todo explicado en un documento.
+
+Por otro lado se estable una semilla a un número determinado, para que así siempre obtener los mismos resultados de ejecución y poder ser replicable en cualquier pc.
 
 ```{r Cargar datos}
 infoRice <- read_xlsx("./Rice_MSC_Dataset.xlsx")
 infoRice <- na.omit(infoRice)
+
+set.seed(27)
 ```
 
+A partir de la variable `ìnfoRice` (contiene los datos en crudo), se van a ir creando subvariables que serán modificaciones de `infoRice`.
 
+# Preparación de los datos
+
+Una vez cargado el conjunto de datos a utilizar, como se tiene un número de predictores elevado y un número considerable de ejemplos, se van a llevar a cabo técnicas que reduzcan el número de predictores. Por un lado extracción de características (PCA) y por otro selección (RFE). Para luego comprobar mediante el uso de modelos para clasificar los diferentes tipos de arroces y ver cual es el mejor método de selección de variables.
+
+## PCA
+
+PCA o análisis de componentes principales es una técnica que permite simplificar la complejidad de espacios muestrales con muchas dimensiones (reducir el número de variables) a la vez que conserva la información (carianza). Lo que hace es encontrar un número de factores (combinación lineal de las variables originales) que explican aproximadamente lo mismo que las variables inciales, en nuestro caso se pide explicar al menos el 85% de la varianza en la muestra.
+
+- Se extrae la columna CLASS, ya que se trata de una variable cualitativa y además es la variable que se quiere clasificar.
 
 ```{r hacer prcomp}
+infoRicePCA <- subset(infoRice, select = -c(CLASS))
+infoRicePCA <- as.data.frame(infoRicePCA)
+```
 
-infoRice3 <- subset(infoRice, select = -c(CLASS))
-infoRice3 <- as.data.frame(infoRice3)
+Aplicando la función `prcomp` que implementa PCA sobre una matriz/dataframe centrando los datos para que tengan media 0 y con el argumento `scale = TRUE` se indica que se quiere escalar las variable para que tengas una desviación estandar de 1. Por otro lado con `center = TRUE`, se consigue que los datos se encuentren en torno al 0, es decir normalizados.
 
-prcompArroces <- prcomp(infoRice3, scale = TRUE, center = TRUE)
-summary(prcompArroces, loadings = TRUE)
+```{r}
+pcaInfoRice <- prcomp(infoRicePCA, scale = TRUE, center = TRUE)
+names(pcaInfoRice)
+```
+
+Se observa que prcomp devuelve una serie de matrices donde se pueden ver `center` y `scale` (medias y desviaciones de las variables antes del PCA), `rotation` (loading de los componentes principales) y las dos que nos interesan: `sdev` (desviación estandar de cada componente principal) y `x` (la matriz original aplicada a rotación).
+
+Con `sdev` se va a poder visualiaar cuantos componentes principales son necesarios para explicar el 85% de la varianza de la muestra.
+
+```{r}
+stdDev <- pcaInfoRice$sdev
+#Se calcula la varianza
+pcaVar<- stdDev^2
+
+propVar <- pcaVar/sum(pcaVar)
+head(cumsum(propVar),10)
+```
+Se puede observar que el primer componente explicar un 41.95%, el segundo junto al primero un 58.18% por lo que el segundo componente explica 16.23%. A medida que se va avanzando se puede observar como cada vez cada componenete aporta menos al valor total de varianza. Para nuestro caso, se debe escoger las 7 primeras compoenente que explican un 86.95% de la varianza.
+
+Se puede decir que tiene tendencia logaritmica con tope en 1. Se muestra en la gráfica mostrada a continuación.
+
+```{r plotComponentes}
+plot(cumsum(propVar), xlab = "Componente principal", ylab = "Proporcion de la varianza explicada", type = "b")
+```
+
+Finalmente se guarda el dataframe a utilizar para los modelos. Además se separa en parte de entrenamiento y parte de test, a la hora de evaluar la calidad de los modelos.
+
+```{r dataSetPCA}
+dataPcas <- as.data.frame(pcaInfoRice$x[,1:7])
 
 infoRice4 <- infoRice
 infoRice4$CLASS <- as.factor(infoRice4$CLASS)
 
-pcas <- as.data.frame(prcompArroces$x[,1:7])
-
-pcasConClases <- cbind(pcas, CLASS = infoRice4$CLASS)
+pcasConClases <- cbind(dataPcas, CLASS = infoRice4$CLASS)
 
 train_i <- sample(1:nrow(pcasConClases),NROW(pcasConClases)*0.8)
 
-datatrain <-pcas[train_i,]
-datatest <-pcas[-train_i,]
+datatest <-dataPcas[-train_i,]
+
+datatrainConClase <- pcasConClases[train_i,]
+datatestConClase <- pcasConClases[-train_i,]
+```
+
+## RFE
+
+**Aqui explicación0**
+
+```{r rfe define}
+infoRiceRFE <- infoRice
+infoRiceRFE$CLASS <- as.factor(infoRiceRFE$CLASS)
+
+parts = sample(1:nrow(infoRiceRFE),NROW(infoRiceRFE)*0.8)
+train = infoRiceRFE[parts, ]
+test = infoRiceRFE[-parts, ]
+
+X_train = train[,-107]
+y_train = train[,107]
+
+control_rfe = rfeControl(functions = rfFuncs, # random forest
+                      method = "repeatedcv", # repeated cv
+                      repeats = 5, # number of repeats
+                      number = 10) # number of folds
+
+result_rfe = rfe(X_train, 
+                 y_train,
+                 sizes = c(1:106),
+                 rfeControl = control_rfe)
+
+result_rfe
+```
+
+```{summary rfe}
+lmProfile<-readRDS("lmprofile.rds")
+summary(lmProfile)
+```
+
+
+
+# Explicación algoritmos
+
+## Random Forest
+
+Random forest es una algoritmo de aprendizaje supervisado que produce, incluso sin ajuste de hiperparámetros, un gran resultado la mayoría de las ocasiones. También es uno de los algorimos más utilizados por su simplicidad y diversidad (se puede utilizar para tareas de regresión y clasificación).
+
+Construye un conjunto de árboles de decision, generalmente entrenados con el metodo de “bagging.” La idea general del método “bagging” es que una combinacion de modelos aumenta el resultado. De forma sencilla: random forest crea muchos árboles de decisión y los fusiona para obtener mayor precisión.
+
+En nuestro caso se va a utilizar dentro del paradigma random forest el algoritmo `Ranger`, que es adecuado para datos con alta dimensión y más rápido. Además, el tipo de árbol a utilizar en el algoritmo es determinado por el tipo de la variable dependiente y a la hora de dividir los nodos dos tipos algoritmos son usados: el primero ordena los valores de las caracteristicas de antemano y accede a ellos por su indice. En el segundo, los valores se recuperan y se ordenan mientras se divide.
+
+Esto último es útil dependiendo de si quieres que sea mas rápido, donde se utilizará el primer algoritmo de splitting, o más eficiente con la memoria, donde se utilizará el segundo algoritmo.
+
+- Otra cosa a tener en cuenta sobre random forest es que no se necesita hacer ninguna modificación a los datos para obtener un buen resultado.
+
+### Elección hiperparámetros
+
+Para obtener los hiperparámetros de un algoritmo vamos a utilizar el comando `getModelInfo`, aunque este solo nos da información sobre el nombre de estos. Para obtener mas información debemos ir a la documentación del paquete que contiene el modelo.
+
+``` {r get model info}
+rangerInfo <- getModelInfo("ranger")
+names(rangerInfo)
+rangerInfo$ranger$parameters
+```
+
+En este caso los parámetros que se pueden modificar de ranger son `mtry`, `splitrule` y `min.node.size`. Pero si vamos a su paquetes vemos que tiene decenas de parámetros como: `importance`, `probability`, `max.depth`, `replace`, etc. Además de otros de los parámetros podemos encontrar una explicación sobre estos, de momento nos centraremos en los 3 obtenidos con `getModelInfo`:
+
+- **mrty**:  Número de variables para posiblemente dividir en cada nodo. El valor predeterminado es la raíz cuadrada redondeada de las variables numéricas.
+- **splitrule**:  Regla de división. Para *clasificación* y estimación de probabilidad “gini,” “extratrees” o “hellinger” con “gini” por defecto. Para *regresión* “variance,” “extratrees,” “maxstat” o “beta” con “variance” predeterminada. Para *supervivencia* “logrank,” “extratrees,” “C” o “maxstat” con “logrank” predeterminado.
+- **min.node.size**: Tamaño mínimo del nodo. Por defecto 1 para clasificación, 5 para regresión, 3 para supervivencia y 10 para probabilidad.
+
+A continuación, se muestra los valores que cara para hacer el grid por defecto.
+
+```{r default grid}
+rangerInfo$ranger$grid
+```
+Observando el código se puede ver qué configuración de hiperparámetros es la óptima para nuestro problema. Probando así:
+
+- El número de variables para dividir cada nodo, por defecto es la raiz de el numero de predictores (en este caso es 2), donde se prueban valores por encima y debajo del por defecto como 1 y 4..
+- Las reglas de división: podr defecto utiliza gini si es un factor.
+- El tamaño mínimo del nodo: por defecto 1 para clasificación, por lo que se preuban algunos valores hasta 3.
+
+### Entrenamiento de los modelos
+
+**La siguiente celda ha sido configurada con eval = FALSE**, este es para evitar tiempos de espera grande para generar el pdf, a pesar de que ranger es un algoritmo bastante rápido, hemos decidico aplicar en todas las celdas destinadas a entrenar un modelo.
+
+```{r fit ranger, eval=FALSE}
+tgrid <- expand.grid(
+     .mtry = c(1,2,4),
+     .splitrule = "gini",
+     .min.node.size = 1:3)
+
+fitControl <- trainControl(
+                           method = "cv",
+                           number = 3,  
+                           verboseIter = F)
+
+rangerFitPCA <- train(CLASS ~ ., data = datatrainConClase, 
+                 method = "ranger", 
+                 trControl = fitControl,
+                 tuneGrid = tgrid,
+                 max.depth = 10,
+                 num.trees = 20)
+saveRDS(rangerFitPCA, "ranger-PCA.rds")
+```
+
+```{r load model ranger pca}
+rangerFitPCA <- readRDS("ranger-PCA.rds")
+rangerFitPCA
+```
+Como se puede observar los mejores resultados se obtiene con los valores de parámetro por defecto, también cabe destacar que al tener una precisión tan alta el algoritmo, apenas se nota la diferencia.
+
+**AQUÍ FALTA EL RFE**
+
+
+## Deep Learning
+
+Las redes neuronales son otra forma de emular ciertas caracteristicas propias de los humanos, como la capacidad de memorizar y asociar ciertos hechos. Si observamos los problemas que no pueden expresarse a traves de un algoritmo, encontraremos una característica en común: la experiencia. Esto es posible de resolver con redes neuronales con multiples capas ocultas porque permiten hacer modelos que pueden aprender relaciones muy complicadas entre sus entradas y salidas. Sin embargo, con datos limitados, muchas de estas relaciones serán el resultado de muestrear ruido. Esto conduce a un sobreajuste y por eso se han desarrolado técnicas para reducirlo, entre ellas dropout.
+
+`Dropout` ignora neuronas (y sus conexiones) durante el entrenamiento de un conjunto de neuronas que se eligen al azar. Esto fuerza a que la red tenga que aprender caracteristicas más robustas para corregir los problemas de las capas anteriores.
+
+- En esta caso las redes neuronales si necesitan de preprocesamiento de los datos para obtener un mejor rendimiento. En concreto, se deben centrar y escalar para que todas las variables tengan el mismo peso. Sin embargo esto ya lo hemos hecho en el momento que se realizó el PCA:
+
+> pcaInfoRice <- prcomp(infoRicePCA, scale = TRUE, center = TRUE)
+
+```{r info mlpKerasDroput}
+mlpKerasDropoutInfo <- getModelInfo("mlpKerasDropout")
+names(mlpKerasDropoutInfo)
+mlpKerasDropoutInfo$mlpKerasDropout$parameters
+```
+- **Size**: Entero positivo. Dimensionalidad del espacio de salida.
+- **Dropout**: Coma flotantante entre 0 y 1. Fracción de las neuronas entrantes a ignorar.
+- **Batch_size**: Entero o NULL. Número de muestras por gradient update, por defecto 32.
+- **Lr**: Coma flotante positivo. Tasa de aprendizaje.
+- **Rho**: Coma flotante positivo. Tasa de decadencia.
+- **Decay**: Coma flotante positivo. Decadencia de la tasa de aprendizaje decay con cada actualización.
+- **Activation**: Nombre de la activación a utilizar. Si se deja vacio no se aplica activación. Algunas de las disponibles son: relu, elu, selu, linear, sigmoid, softmax, tanh, exponential, gelu, swish, etc. Utilizaremos sigmoid.
+
+A continuación se muestra la configuración de hiperparámetro que utiliza por defecto `caret`.
+
+```{r info hiper mlpKeras}
+mlpKerasDropoutInfo$mlpKerasDropout$grid
+```
+Si se observan las funciones que se utilizan y los parámetros recomendados. En concreto caret utiliza las siguientes funciones:
+
+- `keras::optimizer_rmsprop`: donde se recomienda dejar todos los parametros (lr, rho, decay) por defecto menos la tasa de aprendizaje.
+- `keras::layer_dropout`: donde se configura el parametro dropout que especifica que tiene que ser un float entre 0 y 1. Podemos ver que para crear el grid caret utiliza valores de 0 a 0.7, nosotros probaremos 0, 0.3 y 0.7.
+- `keras::layer_dense`: en esta función se utilizan los parámetros size y activation y no se recomienda ningún valor. Pero si observamos como lo crea en grid crea una secuencia desde 2 hasta len*2, en nuestro caso utilizaremos 2, 6, 12 y para activation al tener que devolver valores de 0 a 1 nosotros vamos a utilizar “sigmoid.”
+- `keras::fit` donde se utiliza el parámetro batch_size y pone como valor recomendado 32. Además, al crear el grid lo pone en funcion del numero de filas del data frame. En este caso nosotros utilizaremos nrow(key.Datos.Train)/3 que parece más razonable que solo 32.
+
+### Entrenamiento de los modelos
+
+```{r default grid mlpkeras}
+tgrid <- expand.grid(
+     .size = c(2 ,6, 12),
+     .dropout = c(0, 0.3, 0.7),
+     .batch_size = nrow(datatrainConClase)/3,
+     .lr = c(2e-06, 2e-04),
+     .rho = 0.9,
+     .decay = 0,
+     .activation = "sigmoid")
+
+fitControl <- trainControl(
+                           method = "cv",
+                           number = 3,
+                           verboseIter = F)
+
+PCADropoutFit <- train(CLASS ~ ., data = datatrainConClase, 
+                 method = "mlpKerasDropout",
+                 trControl = fitControl,
+                 tuneGrid = tgrid)
+saveRDS(PCADropoutFit,"mlpKerasDroput-PCA.rds")
+```
+
+```{r load model mlpKerasDropout pca}
+mlpKerasDropoutFitPCA <- readRDS("mlpKerasDropout-PCA.rds")
+mlpKerasDropoutFitPCA
+```
+## (Elegir)
+
+# Test de los modelos
+
+# Comparación modelos
+
+# Bibliografía
+
+- Kuhn, M. (2017, 9 noviembre). *caret/xgbLinear.R at master · topepo/caret*. GitHub. https://github.com/topepo/caret/blob/master/RegressionTests/Code/xgbLinear.R
+- Kuhn, M. (2017, 12 noviembre). *caret/mlpKerasDropout.R at master · topepo/caret*. GitHub. https://github.com/topepo/caret/blob/master/RegressionTests/Code/mlpKerasDropout.R
+- *prcomp function* - RDocumentation. (s. f.). https://www.rdocumentation.org/packages/stats/versions/3.6.2/topics/prcomp
+- Guil, C. (s. f.). *Análisis de componentes principales (PCA)*. RPubs. https://rpubs.com/Cristina_Gil/PCA
+
+
+
+
+
+
+```{r, eval=FALSE}
+infoRice4 <- infoRice
+infoRice4$CLASS <- as.factor(infoRice4$CLASS)
+
+pcasConClases <- cbind(dataPcas, CLASS = infoRice4$CLASS)
+
+train_i <- sample(1:nrow(pcasConClases),NROW(pcasConClases)*0.8)
+
+datatrain <-dataPcas[train_i,]
+datatest <-dataPcas[-train_i,]
 
 datatrainConClase <- pcasConClases[train_i,]
 
 datatestConClase <- pcasConClases[-train_i,]
 ```
 
-```{r Random forest}
+```{r Random forest, eval=FALSE}
 model1 <- ranger(CLASS ~ ., data = datatrainConClase,num.trees = 100)
 preds <- predict(model1,datatest)
 mae(datatestConClase$CLASS,preds$predictions)
@@ -71,13 +320,14 @@ mae(datatestConClase$CLASS,preds$predictions)
 ```{r train mlpKerasDropout, eval=FALSE}
 model_mlpKerasDropout <- train(CLASS ~ ., data = datatrainConClase, 
                             method = "mlpKerasDropout", 
-                            trControl = trainControl(method = "cv", number = 5))
+                            trControl = trainControl(method = "cv", number = 3))
 saveRDS(model_mlpKerasDropout, "mlpKerasDropout.rds")
 ```
 
-```{r test mlpKerasDropout}
-model_mlpKerasDropout <- readRDS("./mlpKerasDropout-PCA.rds")
+```{r test mlpKerasDropout, eval=FALSE}
+model_mlpKerasDropout <- readRDS("./mlpKerasDropout.rds")
 preds_mlpKerasDropout <- predict(model_mlpKerasDropout,datatest)
+setdiff(datatestConClase$CLASS,preds_mlpKerasDropout)
 mae(datatestConClase$CLASS,preds_mlpKerasDropout)
 ```
 
@@ -88,7 +338,7 @@ model_xgboost <- train(CLASS ~ ., data = datatrainConClase,
 saveRDS(model_xgboost, "xgbLinear.rds")
 ```
 
-```{r test xgboost}
+```{r test xgboost, eval=FALSE}
 model_xgbLinear <- readRDS("./xgbLinear.rds")
 preds_xgbLinear <- predict(model_xgbLinear,datatest)
 mae(datatestConClase$CLASS,preds_xgbLinear)
